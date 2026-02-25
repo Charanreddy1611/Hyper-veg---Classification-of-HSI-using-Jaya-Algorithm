@@ -1,5 +1,5 @@
-# Data files
-data/
+# Data files (only root data/ directory, not src/data/)
+/data/
 *.mat
 *.hdr
 *.img
