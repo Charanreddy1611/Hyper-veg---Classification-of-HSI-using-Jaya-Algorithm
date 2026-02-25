@@ -1,0 +1,827 @@
+You are an expert geospatial data scientist and Python engineer helping me build 
+"HyperVeg" — a production-quality hyperspectral vegetation analysis pipeline using 
+the Indian Pines dataset. This project is built to demonstrate mastery of remote 
+sensing physics, geospatial engineering, and ML for a Junior Geospatial Data 
+Scientist job interview.
+
+════════════════════════════════════════════════════════════
+PROJECT OVERVIEW
+════════════════════════════════════════════════════════════
+
+Build a complete end-to-end hyperspectral vegetation health pipeline that:
+1. Downloads and loads the Indian Pines AVIRIS hyperspectral dataset
+2. Simulates a full radiometric calibration pipeline (DN → Radiance → Reflectance)
+3. Applies atmospheric correction physics (Beer-Lambert, radiative transfer)
+4. Performs spectral analysis (indices, dimensionality reduction, unmixing)
+5. Trains and evaluates ML models (SVM + 1D CNN) with proper spatial cross-validation
+6. Produces publication-quality visualizations
+7. Has full unit test coverage with pytest
+8. Follows production engineering standards throughout
+
+════════════════════════════════════════════════════════════
+DATASET
+════════════════════════════════════════════════════════════
+
+Indian Pines — AVIRIS hyperspectral sensor, Northwestern Indiana, USA
+- Spatial dimensions: 145 × 145 pixels
+- Spectral bands: 200 bands (corrected version, water vapor bands removed)
+- Wavelength range: 400–2500 nm (visible through SWIR)
+- 16 vegetation and land cover classes (corn, soybean, grass, forest, etc.)
+- Format: .mat files (scipy.io.loadmat)
+
+Download URLs (no login required):
+  Data:   http://www.ehu.eus/ccwintco/uploads/6/67/Indian_pines_corrected.mat
+  Labels: http://www.ehu.eus/ccwintco/uploads/c/c4/Indian_pines_gt.mat
+
+════════════════════════════════════════════════════════════
+PROJECT STRUCTURE
+════════════════════════════════════════════════════════════
+
+Create exactly this structure:
+
+hyperveg/
+├── README.md
+├── requirements.txt
+├── .gitignore
+├── data/                          (gitignored — downloaded at runtime)
+│   └── .gitkeep
+├── outputs/                       (gitignored — generated figures and results)
+│   └── .gitkeep
+├── src/
+│   ├── __init__.py
+│   ├── data/
+│   │   ├── __init__.py
+│   │   └── loader.py
+│   ├── pipeline/
+│   │   ├── __init__.py
+│   │   ├── calibration.py
+│   │   ├── atmospheric.py
+│   │   └── preprocessing.py
+│   ├── analysis/
+│   │   ├── __init__.py
+│   │   ├── indices.py
+│   │   ├── dimensionality.py
+│   │   └── unmixing.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── svm_classifier.py
+│   │   ├── cnn_classifier.py
+│   │   └── evaluation.py
+│   └── visualization/
+│       ├── __init__.py
+│       └── plots.py
+├── notebooks/
+│   └── 01_exploration.ipynb
+├── tests/
+│   ├── __init__.py
+│   ├── test_calibration.py
+│   ├── test_atmospheric.py
+│   ├── test_indices.py
+│   ├── test_dimensionality.py
+│   └── test_models.py
+└── main.py                        (runs the full pipeline end to end)
+
+════════════════════════════════════════════════════════════
+REQUIREMENTS.TXT
+════════════════════════════════════════════════════════════
+
+numpy>=1.24.0
+scipy>=1.10.0
+xarray>=2023.1.0
+rasterio>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+scikit-learn>=1.3.0
+torch>=2.0.0
+tqdm>=4.65.0
+requests>=2.28.0
+pytest>=7.3.0
+pytest-cov>=4.0.0
+jupyter>=1.0.0
+spectral>=0.23.0
+
+════════════════════════════════════════════════════════════
+MODULE SPECIFICATIONS — BUILD EACH EXACTLY AS DESCRIBED
+════════════════════════════════════════════════════════════
+
+──────────────────────────────────────
+src/data/loader.py
+──────────────────────────────────────
+Purpose: Download, load, and package the Indian Pines dataset into 
+a clean xarray DataArray with proper metadata.
+
+Functions to implement:
+
+1. download_indian_pines(data_dir: str = "data/") -> None
+   - Download both .mat files if not already present
+   - Show download progress with tqdm
+   - Verify file sizes after download
+   - Print confirmation messages
+
+2. load_indian_pines(data_dir: str = "data/") -> tuple[xr.DataArray, np.ndarray, np.ndarray]
+   - Load the .mat files with scipy.io.loadmat
+   - Extract the hyperspectral cube (shape: 145, 145, 200 in mat → convert to 200, 145, 145)
+   - Extract ground truth labels (shape: 145, 145)
+   - Define the 200 wavelength centers from 400nm to 2500nm evenly spaced
+   - Build an xr.DataArray with:
+       dims = ["band", "y", "x"]
+       coords: band = wavelength values (400–2500nm)
+   - Add attrs: sensor, scene, n_classes, wavelength_units, description
+   - Return (cube_dataarray, labels_array, wavelengths_array)
+
+3. get_class_names() -> dict[int, str]
+   - Return dict mapping class integer (0-16) to class name string
+   - 0 = "Unlabeled", 1 = "Alfalfa", 2 = "Corn-notill", 3 = "Corn-mintill",
+     4 = "Corn", 5 = "Grass-pasture", 6 = "Grass-trees", 
+     7 = "Grass-pasture-mowed", 8 = "Hay-windrowed", 9 = "Oats",
+     10 = "Soybean-notill", 11 = "Soybean-mintill", 12 = "Soybean-clean",
+     13 = "Wheat", 14 = "Woods", 15 = "Buildings-Grass-Trees-Drives",
+     16 = "Stone-Steel-Towers"
+
+4. get_dataset_info(cube: xr.DataArray, labels: np.ndarray) -> None
+   - Print a formatted summary: shape, wavelength range, number of labeled pixels,
+     class distribution (count and % for each class), memory usage in MB
+
+──────────────────────────────────────
+src/pipeline/calibration.py
+──────────────────────────────────────
+Purpose: Simulate radiometric calibration — convert Digital Numbers (DN) to 
+at-sensor Radiance. In reality, Indian Pines is already reflectance — we 
+REVERSE ENGINEER synthetic DN from the reflectance data, then calibrate back,
+to demonstrate the full pipeline.
+
+Physics background to implement:
+  L(λ) = gain(λ) × DN(λ) + offset(λ)
+  where gain ∈ [0.005, 0.015] per band (realistic AVIRIS values)
+  and offset ∈ [-1.0, 1.0] per band (dark current simulation)
+
+Functions to implement:
+
+1. generate_synthetic_dn(
+       reflectance_cube: xr.DataArray,
+       wavelengths: np.ndarray,
+       seed: int = 42
+   ) -> tuple[xr.DataArray, np.ndarray, np.ndarray]
+   - Generate realistic per-band gain and offset coefficients
+   - Reverse: DN = (reflectance - offset) / gain  
+   - Add realistic sensor noise: Gaussian noise scaled by SNR
+     SNR varies with wavelength: high SNR (300:1) in VIS, lower (150:1) in SWIR
+   - Quantize to uint16 (0-65535 range)
+   - Return (dn_cube, gain_array, offset_array)
+
+2. apply_radiometric_calibration(
+       dn_cube: xr.DataArray,
+       gain: np.ndarray,
+       offset: np.ndarray,
+       valid_range: tuple = (0.0, 1000.0),
+       bad_pixel_mask: np.ndarray | None = None
+   ) -> xr.DataArray
+   - Apply L = gain * DN + offset per band using broadcasting
+   - Mask bad pixels as NaN if bad_pixel_mask provided
+   - Clip to valid_range
+   - Update DataArray attrs: units="W/m^2/sr/um", calibration_applied=True
+   - Log warnings for clipped values and bad pixels
+
+3. validate_calibration(
+       original_reflectance: xr.DataArray,
+       calibrated_radiance: xr.DataArray,
+       gain: np.ndarray,
+       offset: np.ndarray
+   ) -> dict
+   - Compute per-band correlation between original and calibrated
+   - Compute RMSE per band
+   - Return dict with statistics and pass/fail flag
+
+──────────────────────────────────────
+src/pipeline/atmospheric.py  
+──────────────────────────────────────
+Purpose: Simulate atmospheric correction — convert Radiance to Surface Reflectance.
+Implement the full radiative transfer equation we derived from physics:
+
+  ρ(λ) = π × (L_sensor(λ) - L_path(λ)) / (E_s(λ) × cos(θ_s) × T(λ))
+
+Physics to implement:
+
+Beer-Lambert transmittance:
+  T(λ) = exp(-τ(λ) / cos(θ_s)) × exp(-τ(λ) / cos(θ_v))
+  where τ(λ) = τ_rayleigh(λ) + τ_aerosol(λ)
+  τ_rayleigh(λ) = 0.0088 × λ^(-4.15)  [λ in μm]
+  τ_aerosol(λ) = AOD × (λ/0.55)^(-1.3) [Angstrom exponent]
+
+Rayleigh scattering for path radiance:
+  L_path(λ) ∝ (1 - T_rayleigh(λ)) × E_s(λ) × cos(θ_s) / (4π)
+
+Solar irradiance:
+  Use a simplified Kurucz solar spectrum — approximate as:
+  E_s(λ) = 1800 × exp(-((λ-0.55)^2)/(2×0.3^2)) [W/m²/μm, λ in μm]
+  (simplified Gaussian approximation of the solar spectrum peak)
+
+Functions to implement:
+
+1. compute_solar_irradiance(wavelengths_nm: np.ndarray) -> np.ndarray
+   - Compute simplified solar irradiance at each wavelength
+   - Apply Earth-Sun distance correction for day of year
+   - day_of_year parameter (default 200 — summer acquisition)
+
+2. compute_atmospheric_transmittance(
+       wavelengths_nm: np.ndarray,
+       solar_zenith_deg: float = 35.0,
+       view_zenith_deg: float = 0.0,
+       aod_550: float = 0.1,
+       water_vapor_gcm2: float = 2.0
+   ) -> tuple[np.ndarray, np.ndarray]
+   - Compute Rayleigh optical depth per band
+   - Compute aerosol optical depth per band using Angstrom exponent
+   - Compute two-way transmittance T(λ) = T_down × T_up
+   - Compute path radiance L_path(λ)
+   - Return (transmittance_array, path_radiance_array)
+
+3. apply_atmospheric_correction(
+       radiance_cube: xr.DataArray,
+       wavelengths_nm: np.ndarray,
+       solar_zenith_deg: float = 35.0,
+       aod_550: float = 0.1,
+       water_vapor_gcm2: float = 2.0,
+       clip_reflectance: bool = True
+   ) -> xr.DataArray
+   - Apply the full reflectance equation per band
+   - Guard against near-zero denominator (opaque atmosphere bands)
+   - Clip to [0, 1] physical range
+   - Flag pixels with reflectance > 1.0 before clipping
+   - Update attrs: atmospheric_correction_applied=True, solar_zenith=value
+
+4. compute_toa_reflectance(
+       radiance_cube: xr.DataArray,
+       wavelengths_nm: np.ndarray,
+       solar_zenith_deg: float = 35.0
+   ) -> xr.DataArray
+   - Compute quick TOA reflectance without atmospheric correction
+   - ρ_TOA = π × L / (E_s × cos(θ_s))
+   - Useful for comparison against surface reflectance
+
+──────────────────────────────────────
+src/pipeline/preprocessing.py
+──────────────────────────────────────
+Purpose: Clean the reflectance cube before analysis — remove bad bands,
+water vapor absorption regions, normalize, and prepare for ML.
+
+Water vapor absorption bands to remove (in nm):
+  Region 1: 1350–1450 nm (strong water vapor absorption)
+  Region 2: 1800–1960 nm (strong water vapor absorption)
+  Region 3: 2450–2500 nm (end of SWIR, low SNR)
+
+Functions to implement:
+
+1. remove_water_vapor_bands(
+       cube: xr.DataArray,
+       wavelengths: np.ndarray,
+       absorption_regions: list[tuple] = [(1350,1450),(1800,1960),(2450,2500)]
+   ) -> tuple[xr.DataArray, np.ndarray]
+   - Remove bands in absorption regions
+   - Log how many bands were removed from each region
+   - Return (cleaned_cube, remaining_wavelengths)
+
+2. remove_noisy_bands(
+       cube: xr.DataArray,
+       snr_threshold: float = 50.0
+   ) -> xr.DataArray
+   - Estimate per-band SNR from spatial variance
+   - SNR ≈ mean / std across all pixels per band
+   - Remove bands below threshold
+   - Return cleaned cube
+
+3. normalize_reflectance(
+       cube: xr.DataArray,
+       method: str = "standardize"  # "standardize" | "minmax" | "l2"
+   ) -> tuple[xr.DataArray, dict]
+   - standardize: subtract mean, divide by std (per band, computed on valid pixels)
+   - minmax: scale to [0,1] per band
+   - l2: normalize each pixel spectrum to unit L2 norm
+   - Store normalization parameters in returned dict for inverse transform
+   - IMPORTANT: only compute stats from training pixels, not test
+
+4. extract_pixel_matrix(
+       cube: xr.DataArray,
+       labels: np.ndarray,
+       exclude_unlabeled: bool = True
+   ) -> tuple[np.ndarray, np.ndarray]
+   - Reshape cube (band, y, x) → pixels (n_pixels, n_bands)
+   - Filter out unlabeled pixels (label == 0) if requested
+   - Return (X matrix, y labels vector)
+
+──────────────────────────────────────
+src/analysis/indices.py
+──────────────────────────────────────
+Purpose: Compute vegetation spectral indices from reflectance cube.
+All indices should return xr.DataArray with proper metadata.
+
+Implement all indices using the nearest-wavelength band selection:
+  band = cube.sel(band=target_wavelength, method="nearest")
+
+Indices to implement (with full physics explanation in docstrings):
+
+1. compute_ndvi(cube: xr.DataArray) -> xr.DataArray
+   - NDVI = (NIR - Red) / (NIR + Red)
+   - Red band: ~670 nm, NIR band: ~865 nm
+   - Guard against division by zero → NaN
+   - Physical meaning: photosynthetic activity, healthy vegetation > 0.4
+
+2. compute_evi(cube: xr.DataArray) -> xr.DataArray
+   - EVI = 2.5 × (NIR - Red) / (NIR + 6×Red - 7.5×Blue + 1)
+   - Blue: ~490nm, Red: ~670nm, NIR: ~865nm
+   - Reduces atmospheric and soil background effects vs NDVI
+
+3. compute_red_edge_position(cube: xr.DataArray) -> xr.DataArray
+   - Find the wavelength of maximum first derivative in 680–750nm range
+   - This is the "red edge inflection point" — sensitive to chlorophyll content
+   - Higher red edge position → more chlorophyll → healthier vegetation
+
+4. compute_ndwi(cube: xr.DataArray) -> xr.DataArray
+   - NDWI = (Green - NIR) / (Green + NIR)
+   - Green: ~550nm, NIR: ~865nm
+   - Detects water content and open water bodies
+
+5. compute_nbr(cube: xr.DataArray) -> xr.DataArray
+   - NBR = (NIR - SWIR) / (NIR + SWIR)
+   - NIR: ~865nm, SWIR: ~2200nm
+   - Burn ratio — also sensitive to vegetation moisture stress
+
+6. compute_all_indices(cube: xr.DataArray) -> xr.Dataset
+   - Compute all indices above
+   - Return as xr.Dataset with variable names: ndvi, evi, red_edge, ndwi, nbr
+
+──────────────────────────────────────
+src/analysis/dimensionality.py
+──────────────────────────────────────
+Purpose: Reduce hyperspectral dimensionality for ML and visualization.
+
+Functions to implement:
+
+1. apply_pca(
+       cube: xr.DataArray,
+       n_components: int = 20,
+       valid_mask: np.ndarray | None = None
+   ) -> tuple[xr.DataArray, PCA, np.ndarray]
+   - Reshape cube to (n_pixels, n_bands)
+   - Fit PCA on valid pixels only (exclude unlabeled if mask provided)
+   - Transform all pixels
+   - Reshape back to (n_components, y, x)
+   - Return (pca_cube, fitted_pca_object, explained_variance_ratio)
+   - Print cumulative variance explained
+
+2. apply_mnf(
+       cube: xr.DataArray,
+       n_components: int = 20
+   ) -> tuple[xr.DataArray, np.ndarray]
+   - Implement Minimum Noise Fraction transform
+   - Step 1: Estimate noise covariance from horizontal+vertical pixel differences
+   - Step 2: Whiten by noise covariance
+   - Step 3: PCA on whitened data
+   - Return (mnf_cube, transform_matrix)
+   - Explain in docstring why MNF is better than PCA for remote sensing
+
+3. plot_variance_explained(
+       explained_variance: np.ndarray,
+       title: str = "PCA Variance Explained",
+       save_path: str | None = None
+   ) -> None
+   - Plot individual and cumulative variance explained vs component number
+   - Mark the component where cumulative variance crosses 95% and 99%
+
+──────────────────────────────────────
+src/analysis/unmixing.py
+──────────────────────────────────────
+Purpose: Spectral unmixing — decompose mixed pixels into endmember fractions.
+
+Physics: Linear Mixing Model
+  x = E × a + ε
+  subject to: a_k >= 0 (non-negativity)
+              sum(a_k) = 1 (sum-to-one)
+
+Functions to implement:
+
+1. extract_endmembers_manual(
+       cube: xr.DataArray,
+       labels: np.ndarray,
+       class_ids: list[int],
+       class_names: dict
+   ) -> tuple[np.ndarray, list[str]]
+   - Extract mean spectrum for each requested class from labeled pixels
+   - This gives us physically meaningful endmembers from ground truth
+   - Return (endmember_matrix shape (n_bands, n_endmembers), endmember_names)
+
+2. fully_constrained_unmix_pixel(
+       pixel_spectrum: np.ndarray,
+       endmember_matrix: np.ndarray
+   ) -> np.ndarray
+   - Solve FCLS for a single pixel using scipy.optimize.minimize
+   - Objective: minimize ||x - E×a||²
+   - Constraints: sum(a)=1, a_k >= 0
+   - Return abundance vector
+
+3. unmix_cube(
+       cube: xr.DataArray,
+       endmember_matrix: np.ndarray,
+       endmember_names: list[str],
+       valid_mask: np.ndarray | None = None
+   ) -> xr.Dataset
+   - Apply FCLS to every valid pixel in the cube
+   - Show progress bar with tqdm
+   - Return xr.Dataset with one DataArray per endmember (y, x shape)
+   - Each variable is the fractional abundance map for that endmember
+
+4. compute_reconstruction_error(
+       cube: xr.DataArray,
+       abundances: xr.Dataset,
+       endmember_matrix: np.ndarray
+   ) -> xr.DataArray
+   - Reconstruct spectra from abundances: x_hat = E × a
+   - Compute per-pixel RMSE between original and reconstructed spectrum
+   - Return error map (y, x)
+
+──────────────────────────────────────
+src/models/svm_classifier.py
+──────────────────────────────────────
+Purpose: SVM classification with proper spatial cross-validation.
+
+CRITICAL: Use spatial cross-validation — split by spatial blocks, 
+NOT random split. This is the scientifically correct approach.
+
+Functions to implement:
+
+1. create_spatial_blocks(
+       labels: np.ndarray,
+       n_blocks: int = 5
+   ) -> np.ndarray
+   - Divide the 145×145 spatial grid into n_blocks × n_blocks blocks
+   - Assign each pixel a block ID (0 to n_blocks²-1)
+   - Return block_id map (145, 145)
+
+2. spatial_cross_validation_split(
+       X: np.ndarray,
+       y: np.ndarray,
+       spatial_positions: np.ndarray,
+       block_ids: np.ndarray,
+       test_block: int
+   ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+   - Hold out one spatial block as test, rest as train
+   - Return (X_train, X_test, y_train, y_test)
+
+3. train_svm_classifier(
+       X_train: np.ndarray,
+       y_train: np.ndarray,
+       kernel: str = "rbf",
+       C: float = 10.0,
+       gamma: str = "scale",
+       optimize: bool = True
+   ) -> Pipeline
+   - Build sklearn Pipeline: StandardScaler → SVC
+   - If optimize=True: run GridSearchCV over C=[0.1,1,10,100] and gamma=["scale","auto",0.001,0.01]
+   - Use f1_macro scoring for grid search
+   - Return fitted pipeline
+
+4. run_spatial_cv(
+       X: np.ndarray,
+       y: np.ndarray,
+       block_ids: np.ndarray,
+       n_blocks: int = 5
+   ) -> dict
+   - Run full spatial cross-validation
+   - For each block: train on rest, evaluate on held-out block
+   - Aggregate: mean/std of OA, kappa, per-class F1
+   - Return results dict
+
+──────────────────────────────────────
+src/models/cnn_classifier.py
+──────────────────────────────────────
+Purpose: 1D CNN classifier treating each pixel spectrum as a 1D signal.
+Implement in PyTorch. Physical motivation: convolution detects local 
+spectral features (absorption dips, reflectance peaks) — matches the 
+physics of spectral signatures.
+
+Architecture:
+  Input: (batch, 1, n_bands)  — 1 channel, n_bands "timesteps"
+  Conv1d(1→32, kernel=7, padding=3) + BatchNorm + ReLU
+  Conv1d(32→64, kernel=5, padding=2) + BatchNorm + ReLU
+  MaxPool1d(2)
+  Conv1d(64→128, kernel=3, padding=1) + BatchNorm + ReLU
+  Conv1d(128→256, kernel=3, padding=1) + BatchNorm + ReLU
+  GlobalAveragePooling (mean over band dimension)
+  Dropout(0.5)
+  Linear(256→128) + ReLU
+  Dropout(0.3)
+  Linear(128→n_classes)
+
+Classes to implement:
+
+1. SpectralCNN(nn.Module)
+   - __init__(self, n_bands: int, n_classes: int)
+   - forward(self, x: torch.Tensor) -> torch.Tensor
+   - Implement the architecture above
+   - Add method: get_spectral_features(x) that returns the 256-dim embedding
+
+2. HyperspectralDataset(Dataset)
+   - __init__(self, X: np.ndarray, y: np.ndarray)
+   - X shape: (n_pixels, n_bands), y shape: (n_pixels,)
+   - __getitem__: return (tensor of shape (1, n_bands), label tensor)
+   - Handle class label offset (subtract 1 since labels are 1-indexed)
+
+3. train_cnn(
+       X_train: np.ndarray,
+       y_train: np.ndarray,
+       X_val: np.ndarray,
+       y_val: np.ndarray,
+       n_epochs: int = 50,
+       batch_size: int = 64,
+       learning_rate: float = 1e-3,
+       device: str = "auto"
+   ) -> tuple[SpectralCNN, dict]
+   - device "auto" → use CUDA if available, else MPS, else CPU
+   - Use Adam optimizer with weight decay=1e-4
+   - Use CrossEntropyLoss with class weights (handle imbalance)
+   - Track train loss, val loss, val accuracy per epoch
+   - Implement early stopping with patience=10
+   - Return (best_model, history_dict)
+
+4. evaluate_cnn(
+       model: SpectralCNN,
+       X_test: np.ndarray,
+       y_test: np.ndarray,
+       class_names: dict,
+       device: str = "auto"
+   ) -> dict
+   - Run inference in batches
+   - Return predictions, probabilities, and all evaluation metrics
+
+──────────────────────────────────────
+src/models/evaluation.py
+──────────────────────────────────────
+Purpose: Scientific evaluation of classification results.
+
+Functions to implement:
+
+1. compute_metrics(
+       y_true: np.ndarray,
+       y_pred: np.ndarray,
+       class_names: dict
+   ) -> dict
+   - Overall Accuracy (OA)
+   - Cohen's Kappa coefficient
+   - Per-class Precision, Recall, F1
+   - Macro-averaged F1
+   - Confusion matrix (normalized and raw)
+
+2. plot_confusion_matrix(
+       cm: np.ndarray,
+       class_names: list[str],
+       normalize: bool = True,
+       title: str = "Confusion Matrix",
+       save_path: str | None = None
+   ) -> None
+   - Seaborn heatmap, proper formatting
+   - Show both counts and percentages if not normalized
+
+3. plot_classification_map(
+       predictions: np.ndarray,
+       labels_true: np.ndarray,
+       class_names: dict,
+       title: str = "Classification Map",
+       save_path: str | None = None
+   ) -> None
+   - Side-by-side: ground truth | predictions
+   - Use a colormap with distinct colors per class
+   - Add legend with class names
+
+4. compare_models(
+       results: dict[str, dict]
+   ) -> None
+   - Takes dict of {model_name: metrics_dict}
+   - Print formatted comparison table
+   - Bar chart comparing OA and Kappa across models
+
+──────────────────────────────────────
+src/visualization/plots.py
+──────────────────────────────────────
+Purpose: All visualization functions for the project.
+
+Functions to implement:
+
+1. plot_false_color_composite(
+       cube: xr.DataArray,
+       r_nm: float = 680.0,
+       g_nm: float = 550.0,
+       b_nm: float = 450.0,
+       title: str = "False Color Composite",
+       save_path: str | None = None
+   ) -> None
+   - Select 3 bands at given wavelengths
+   - Stretch to 2nd–98th percentile for visualization
+   - Show as RGB image
+
+2. plot_spectral_signatures(
+       cube: xr.DataArray,
+       labels: np.ndarray,
+       class_names: dict,
+       class_ids: list[int] | None = None,
+       wavelengths: np.ndarray | None = None,
+       save_path: str | None = None
+   ) -> None
+   - Plot mean spectrum ± 1 std for each requested class
+   - Mark water vapor absorption regions as grey shaded areas
+   - Mark key wavelengths: red edge, chlorophyll absorption at 670nm, NIR plateau
+   - x-axis: wavelength (nm), y-axis: reflectance
+
+3. plot_spectral_indices_maps(
+       indices_dataset: xr.Dataset,
+       save_path: str | None = None
+   ) -> None
+   - Grid of 2D maps for each index (NDVI, EVI, NBR, NDWI)
+   - Proper colormaps: NDVI/EVI → RdYlGn, NDWI → Blues, NBR → RdBu
+   - Add colorbar and title for each
+
+4. plot_pca_components(
+       pca_cube: xr.DataArray,
+       n_show: int = 6,
+       save_path: str | None = None
+   ) -> None
+   - Show first n_show PCA component images as spatial maps
+   - Label each with its explained variance percentage
+
+5. plot_training_history(
+       history: dict,
+       save_path: str | None = None
+   ) -> None
+   - Two subplots: loss curves | accuracy curves
+   - Train vs validation, with early stopping point marked
+
+6. plot_abundance_maps(
+       abundances: xr.Dataset,
+       save_path: str | None = None
+   ) -> None
+   - One subplot per endmember abundance map
+   - Colormap: 0→white, 1→class color
+
+──────────────────────────────────────
+tests/
+──────────────────────────────────────
+Write comprehensive unit tests for:
+
+tests/test_calibration.py:
+- test_dn_shape_preserved: output shape == input shape
+- test_calibration_linear_relationship: verify L = G×DN + B
+- test_bad_pixel_masking: bad pixels become NaN
+- test_valid_range_clipping: values clipped to valid range
+- test_negative_gain_raises: ValueError for negative gain
+
+tests/test_atmospheric.py:
+- test_transmittance_range: T values in [0, 1]
+- test_reflectance_physical_range: ρ values in [0, 1] after correction
+- test_high_zenith_raises: ValueError for θ_s > 85°
+- test_rayleigh_wavelength_dependence: verify τ ∝ λ^-4 relationship
+
+tests/test_indices.py:
+- test_ndvi_range: NDVI in [-1, 1]
+- test_ndvi_vegetation_positive: vegetated pixels have positive NDVI
+- test_ndvi_zero_division_handled: NaN not inf when denominator=0
+- test_evi_range: EVI values are reasonable
+- test_all_indices_returns_dataset: compute_all_indices returns xr.Dataset
+
+tests/test_dimensionality.py:
+- test_pca_output_shape: correct (n_components, y, x) shape
+- test_pca_variance_sum: explained variance sums to ≤ 1.0
+- test_mnf_output_shape: matches PCA shape
+- test_normalization_reversible: inverse transform recovers original
+
+tests/test_models.py:
+- test_spatial_blocks_coverage: all labeled pixels assigned a block
+- test_svm_pipeline_runs: end-to-end SVM trains and predicts without error
+- test_cnn_forward_pass: correct output shape for batch input
+- test_cnn_output_classes: output has n_classes logits
+
+Use pytest fixtures for synthetic data (small 10×10×20 cubes).
+Use np.testing.assert_allclose for numerical checks.
+Never use real downloaded data in unit tests — always synthetic.
+
+──────────────────────────────────────
+main.py
+──────────────────────────────────────
+Purpose: Run the complete pipeline end to end.
+
+Structure:
+  1. Banner/header
+  2. Download data if needed
+  3. Load dataset → print info
+  4. PIPELINE STAGE 1: Simulate DN from reflectance
+  5. PIPELINE STAGE 2: Radiometric calibration (DN → Radiance)
+  6. PIPELINE STAGE 3: Atmospheric correction (Radiance → Reflectance)
+  7. PIPELINE STAGE 4: Preprocessing (bad band removal, normalization)
+  8. ANALYSIS STAGE 1: Compute spectral indices → save maps
+  9. ANALYSIS STAGE 2: PCA + MNF dimensionality reduction
+  10. ANALYSIS STAGE 3: Spectral unmixing (4 endmembers: corn, soybean, grass, woods)
+  11. MODEL STAGE 1: SVM with spatial cross-validation → print metrics
+  12. MODEL STAGE 2: 1D CNN training → print metrics
+  13. COMPARISON: Print side-by-side model comparison
+  14. Save all outputs to outputs/ directory
+  15. Final summary
+
+Add timing for each stage using time.time().
+Add clear section separators in stdout.
+Make it runnable with: python main.py
+
+──────────────────────────────────────
+README.md
+──────────────────────────────────────
+Write a professional README with:
+  - Project title and description
+  - Scientific background (2 paragraphs on hyperspectral remote sensing)
+  - Dataset description
+  - Pipeline diagram (ASCII art)
+  - Installation instructions
+  - Usage: python main.py
+  - Project structure tree
+  - Results summary (placeholder for actual numbers)
+  - Physics equations rendered in markdown
+  - References to key papers and the Indian Pines dataset
+
+════════════════════════════════════════════════════════════
+CODING STANDARDS — ENFORCE THROUGHOUT
+════════════════════════════════════════════════════════════
+
+1. Every function must have a complete docstring with:
+   - One-line summary
+   - Parameters section with types and descriptions
+   - Returns section
+   - Physics explanation where relevant (reference the equation)
+
+2. Type hints on every function signature
+
+3. Use logging (not print) inside src/ modules. 
+   Use print only in main.py and notebooks.
+
+4. Never hardcode paths — use pathlib.Path throughout
+
+5. All numpy operations must use broadcasting correctly — 
+   never use Python loops over pixels or bands
+
+6. Use np.testing for all numerical assertions in tests
+
+7. Every DataArray returned must have updated attrs
+
+8. Handle edge cases explicitly:
+   - Division by zero → NaN, not inf
+   - Empty arrays → raise ValueError with message
+   - NaN pixels → propagate correctly through pipeline
+
+9. Use dataclasses for configuration objects
+
+10. Random seeds must be settable for reproducibility
+
+════════════════════════════════════════════════════════════
+PHYSICS ACCURACY REQUIREMENTS
+════════════════════════════════════════════════════════════
+
+The following physical relationships must be correctly implemented:
+
+1. Beer-Lambert: T(λ) = exp(-τ(λ) × sec(θ))
+2. Rayleigh optical depth: τ_R(λ) = 0.0088 × λ^(-4.15) [λ in μm]
+3. Reflectance equation: ρ = π(L - L_path) / (E_s × cos(θ_s) × T)
+4. π factor comes from Lambertian hemisphere integration
+5. Rayleigh scattering ∝ λ^-4 — blue scatters more than red
+6. SNR varies with wavelength — SWIR has lower SNR than visible
+7. Water vapor absorption bands are at correct wavelengths
+8. NDVI red edge physics correctly implemented
+
+════════════════════════════════════════════════════════════
+WHAT TO BUILD FIRST (SUGGESTED ORDER)
+════════════════════════════════════════════════════════════
+
+1. Project skeleton (all folders, empty __init__.py files, requirements.txt, .gitignore)
+2. src/data/loader.py + tests
+3. src/pipeline/calibration.py + tests
+4. src/pipeline/atmospheric.py + tests
+5. src/pipeline/preprocessing.py
+6. src/analysis/indices.py + tests
+7. src/analysis/dimensionality.py + tests
+8. src/analysis/unmixing.py
+9. src/visualization/plots.py
+10. src/models/svm_classifier.py + tests
+11. src/models/cnn_classifier.py + tests
+12. src/models/evaluation.py
+13. main.py
+14. README.md
+
+════════════════════════════════════════════════════════════
+FINAL CHECKS BEFORE DONE
+════════════════════════════════════════════════════════════
+
+- [ ] python main.py runs without errors end to end
+- [ ] pytest passes with >80% coverage
+- [ ] All outputs saved to outputs/ folder
+- [ ] No hardcoded paths anywhere
+- [ ] All physics equations referenced in docstrings
+- [ ] README is complete and professional
+- [ ] .gitignore covers: data/, outputs/, __pycache__/, .env, *.mat, *.pyc
+- [ ] requirements.txt is complete and pinned
+
+Start by creating the full project skeleton, then implement module by module 
+in the order above. Ask me if any physics or engineering decision is unclear.
